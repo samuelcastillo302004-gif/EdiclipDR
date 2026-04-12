@@ -1353,16 +1353,29 @@ window.AppModule1 = (() => {
 
                     function getPreferredTranscriptionSegmentDuration(file, totalDuration) {
                         const sizeMb = (file?.size || 0) / (1024 * 1024);
-                        if (sizeMb >= 200 || totalDuration >= 90 * 60) return 45;
-                        if (sizeMb >= 120 || totalDuration >= 45 * 60) return 60;
-                        if (sizeMb >= 60 || totalDuration >= 15 * 60) return 75;
-                        return 90;
+                        if (sizeMb >= 900 || totalDuration >= 150 * 60) return 35;
+                        if (sizeMb >= 500 || totalDuration >= 90 * 60) return 40;
+                        if (sizeMb >= 250 || totalDuration >= 45 * 60) return 22;
+                        if (sizeMb >= 120 || totalDuration >= 20 * 60) return 28;
+                        if (sizeMb >= 60 || totalDuration >= 10 * 60) return 35;
+                        return 45;
                     }
 
                     function shouldUseRemoteStorageTranscription(file, duration) {
                         if (!file || !file.type.startsWith("video/")) return false;
                         const sizeMb = (file.size || 0) / (1024 * 1024);
-                        return sizeMb >= 180 || duration >= 20 * 60;
+                        return sizeMb >= 850 || duration >= 120 * 60;
+                    }
+
+                    function getDeepgramRetryDelay(attempt) {
+                        const safeAttempt = Math.max(1, Number(attempt) || 1);
+                        return Math.min(20000, 1200 * Math.pow(1.65, safeAttempt - 1));
+                    }
+
+                    async function waitForDeepgramRetry(delayMs) {
+                        await new Promise((resolve) => {
+                            window.setTimeout(resolve, Math.max(0, delayMs || 0));
+                        });
                     }
 
                     function getFirebaseStorageInstance() {
@@ -1413,10 +1426,10 @@ window.AppModule1 = (() => {
 
                     function shouldRetrySegmentWithSplit(error, segmentDuration) {
                         const safeDuration = Number(segmentDuration) || 0;
-                        return safeDuration > 20 && (shouldRetryDeepgramError(error) || isDeepgramDecodeError(error));
+                        return safeDuration > 8 && (shouldRetryDeepgramError(error) || isDeepgramDecodeError(error));
                     }
 
-                    async function transcribeBlobWithRetries(blob, url, apiKey, progressBarEl, progressTextEl, statusMessages, uploadStartPercent, maxAttempts = 3) {
+                    async function transcribeBlobWithRetries(blob, url, apiKey, progressBarEl, progressTextEl, statusMessages, uploadStartPercent, maxAttempts = 10) {
                         let lastError = null;
                         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                             try {
@@ -1434,11 +1447,13 @@ window.AppModule1 = (() => {
                                 if (!shouldRetryDeepgramError(error) || attempt === maxAttempts) {
                                     throw error;
                                 }
+                                const retryDelay = getDeepgramRetryDelay(attempt);
                                 updateStatus(
-                                    "Deepgram falló en el intento " + attempt + "; reanudando automáticamente...",
+                                    "Conexion inestable. Reintentando automaticamente en " + Math.ceil(retryDelay / 1000) + "s (intento " + attempt + " de " + maxAttempts + ")...",
                                     true,
                                 );
                                 setProgress(progressBarEl, progressTextEl, Math.max(uploadStartPercent, 25));
+                                await waitForDeepgramRetry(retryDelay);
                             }
                         }
                         throw lastError || new Error("No se pudo transcribir el audio.");
@@ -1565,7 +1580,7 @@ window.AppModule1 = (() => {
                             subtitleLanguage,
                             segmentIndex,
                             segmentCount,
-                            minSegmentDuration = 20,
+                            minSegmentDuration = 8,
                         } = requestConfig;
 
                         try {
@@ -2699,7 +2714,7 @@ window.AppModule1 = (() => {
                                 : shouldUseRemoteTranscription
                                 ? "Preparando transcripción por URL para videos pesados..."
                                 : wantsOptimizedAudio
-                                ? "Preparando transcripción resistente para conexiones lentas..."
+                                ? "Preparando transcripción reforzada para conexión mala..."
                                 : baseStatusMessages.upload,
                             true,
                         );
@@ -2901,10 +2916,10 @@ window.AppModule1 = (() => {
                             const text = err.text || err.message || "Error desconocido";
                             if (status === 429 || text.toLowerCase().includes("quota")) {
                                 updateStatus("Deepgram: cuota excedida. Usa Prueba local.");
-                            } else if (status === 504) {
-                                updateStatus("Deepgram tardó demasiado incluso con audio optimizado. Intenta con un clip más corto.");
+                            } else if (status === 504 || shouldRetryDeepgramError(err) || isDeepgramDecodeError(err)) {
+                                updateStatus("La conexión está demasiado inestable para terminar ahora mismo. La app ya intentó varias veces y en segmentos pequeños. Vuelve a intentarlo dejando la pestaña abierta.");
                             } else {
-                                updateStatus("Error Deepgram: " + (status ? status + " " : "") + text);
+                                updateStatus("No se pudo completar la transcripción en este intento. Reintenta en unos segundos.");
                             }
                             console.error(err);
                         }
