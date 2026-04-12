@@ -1243,6 +1243,32 @@ window.AppModule1 = (() => {
                         return segments;
                     }
 
+                    function buildTranscriptionSegmentsForRange(rangeStart, rangeEnd, maxSegmentDuration = 75) {
+                        const segments = [];
+                        let start = Math.max(0, rangeStart || 0);
+                        const safeEnd = Math.max(start, rangeEnd || 0);
+
+                        while (start < safeEnd) {
+                            const end = Math.min(safeEnd, start + maxSegmentDuration);
+                            segments.push({
+                                start,
+                                end,
+                                dur: Math.max(0, end - start),
+                            });
+                            start = end;
+                        }
+
+                        return segments;
+                    }
+
+                    function getPreferredTranscriptionSegmentDuration(file, totalDuration) {
+                        const sizeMb = (file?.size || 0) / (1024 * 1024);
+                        if (sizeMb >= 200 || totalDuration >= 90 * 60) return 45;
+                        if (sizeMb >= 120 || totalDuration >= 45 * 60) return 60;
+                        if (sizeMb >= 60 || totalDuration >= 15 * 60) return 75;
+                        return 90;
+                    }
+
                     async function buildCuesFromDeepgramResponse(json, duration, subtitleLanguage) {
                         const transcript =
                             json?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
@@ -1282,6 +1308,11 @@ window.AppModule1 = (() => {
                         return text.includes("unable to decode audio data") || text.includes("decode audio");
                     }
 
+                    function shouldRetrySegmentWithSplit(error, segmentDuration) {
+                        const safeDuration = Number(segmentDuration) || 0;
+                        return safeDuration > 20 && (shouldRetryDeepgramError(error) || isDeepgramDecodeError(error));
+                    }
+
                     async function transcribeBlobWithRetries(blob, url, apiKey, progressBarEl, progressTextEl, statusMessages, uploadStartPercent, maxAttempts = 3) {
                         let lastError = null;
                         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1310,7 +1341,75 @@ window.AppModule1 = (() => {
                         throw lastError || new Error("No se pudo transcribir el audio.");
                     }
 
-                    async function transcribeVideoInSegments(file, segments, url, apiKey, progressBarEl, progressTextEl, subtitleLanguage) {
+                    async function transcribeSegmentRange(file, segment, requestConfig) {
+                        const {
+                            url,
+                            apiKey,
+                            progressBarEl,
+                            progressTextEl,
+                            subtitleLanguage,
+                            segmentIndex,
+                            segmentCount,
+                            minSegmentDuration = 20,
+                        } = requestConfig;
+
+                        try {
+                            const segmentAudio = await createOptimizedAudioForTranscription(file, progressBarEl, progressTextEl, {
+                                clipRange: { start: segment.start, end: segment.end },
+                            });
+
+                            const json = await transcribeBlobWithRetries(
+                                segmentAudio,
+                                url,
+                                apiKey,
+                                progressBarEl,
+                                progressTextEl,
+                                {
+                                    upload: "Subiendo segmento " + segmentIndex + " de " + segmentCount + "...",
+                                    optimizedUpload: "Subiendo audio del segmento " + segmentIndex + "...",
+                                    processing: "Procesando segmento " + segmentIndex + " de " + segmentCount + "...",
+                                },
+                                Math.max(25, ((segmentIndex - 1) / Math.max(1, segmentCount)) * 100 + 5),
+                            );
+
+                            return await buildCuesFromDeepgramResponse(
+                                json,
+                                segment.dur,
+                                subtitleLanguage,
+                            );
+                        } catch (error) {
+                            if (!shouldRetrySegmentWithSplit(error, segment.dur) || segment.dur <= minSegmentDuration) {
+                                throw error;
+                            }
+
+                            const childSegments = buildTranscriptionSegmentsForRange(segment.start, segment.end, Math.max(minSegmentDuration, Math.ceil(segment.dur / 2)));
+                            let childCues = [];
+                            let childWords = null;
+
+                            updateStatus(
+                                "La red va lenta o Deepgram rechazó un tramo; reintentando el segmento " + segmentIndex + " en partes más pequeñas...",
+                                true,
+                            );
+
+                            for (let childIndex = 0; childIndex < childSegments.length; childIndex++) {
+                                const childSegment = childSegments[childIndex];
+                                const childResult = await transcribeSegmentRange(file, childSegment, {
+                                    ...requestConfig,
+                                    segmentIndex: segmentIndex + "." + (childIndex + 1),
+                                    segmentCount,
+                                });
+                                childCues.push(...shiftCuesToTimeline(childResult.cues, childSegment.start - segment.start));
+                                childWords = childWords || childResult.words || null;
+                            }
+
+                            return {
+                                cues: normalizeCueTimeline(childCues, segment.dur),
+                                words: childWords,
+                            };
+                        }
+                    }
+
+                    async function transcribeVideoInSegments(file, segments, url, apiKey, progressBarEl, progressTextEl, subtitleLanguage, timelineDuration) {
                         const mergedCues = [];
                         let usedPreciseWords = false;
 
@@ -1324,29 +1423,15 @@ window.AppModule1 = (() => {
                                 true,
                             );
 
-                            const segmentAudio = await createOptimizedAudioForTranscription(file, progressBarEl, progressTextEl, {
-                                clipRange: { start: segment.start, end: segment.end },
-                            });
-
-                            const json = await transcribeBlobWithRetries(
-                                segmentAudio,
+                            const segmentResult = await transcribeSegmentRange(file, segment, {
                                 url,
                                 apiKey,
                                 progressBarEl,
                                 progressTextEl,
-                                {
-                                    upload: "Subiendo segmento " + (index + 1) + " de " + segments.length + "...",
-                                    optimizedUpload: "Subiendo audio del segmento " + (index + 1) + "...",
-                                    processing: "Procesando segmento " + (index + 1) + " de " + segments.length + "...",
-                                },
-                                Math.max(25, progressStart + 5),
-                            );
-
-                            const segmentResult = await buildCuesFromDeepgramResponse(
-                                json,
-                                segment.dur,
                                 subtitleLanguage,
-                            );
+                                segmentIndex: index + 1,
+                                segmentCount: segments.length,
+                            });
                             const shiftedSegmentCues = shiftCuesToTimeline(segmentResult.cues, segment.start);
                             mergedCues.push(...shiftedSegmentCues);
                             usedPreciseWords = usedPreciseWords || Boolean(segmentResult.words && segmentResult.words.length > 0);
@@ -1354,7 +1439,7 @@ window.AppModule1 = (() => {
                         }
 
                         return {
-                            cues: normalizeCueTimeline(mergedCues, videoDuration || undefined),
+                            cues: normalizeCueTimeline(mergedCues, timelineDuration || undefined),
                             words: usedPreciseWords,
                         };
                     }
@@ -1687,6 +1772,7 @@ window.AppModule1 = (() => {
                             return await new Promise((resolve, reject) => {
                                 const xhr = new XMLHttpRequest();
                                 xhr.open("POST", url);
+                                xhr.timeout = 15 * 60 * 1000;
                                 xhr.setRequestHeader("Authorization", "Token " + apiKey);
                                 xhr.setRequestHeader("Content-Type", blob.type || "application/octet-stream");
 
@@ -1724,6 +1810,10 @@ window.AppModule1 = (() => {
                                 xhr.onerror = () => {
                                     if (processingInterval) clearInterval(processingInterval);
                                     reject(new Error("Error de red"));
+                                };
+                                xhr.ontimeout = () => {
+                                    if (processingInterval) clearInterval(processingInterval);
+                                    reject(new Error("Timeout de subida"));
                                 };
                                 xhr.send(blob);
                             });
@@ -2352,7 +2442,11 @@ window.AppModule1 = (() => {
                         const subtitleLanguage = getSelectedSubtitleLanguage();
                         const deepgramLanguage = "es";
                         const activeClip = isViewingClip && selectedClip ? selectedClip : null;
-                        const shouldUseSegmentedTranscription = !activeClip && shouldPreprocessBeforeUpload(file, videoDuration || 0);
+                        const currentRangeStart = activeClip ? activeClip.start : 0;
+                        const currentRangeEnd = activeClip ? activeClip.end : videoDuration || 0;
+                        const currentRangeDuration = Math.max(0, currentRangeEnd - currentRangeStart);
+                        const preferredSegmentDuration = getPreferredTranscriptionSegmentDuration(file, currentRangeDuration || videoDuration || 0);
+                        const shouldUseSegmentedTranscription = file.type.startsWith("video/") && currentRangeDuration > 0;
                         const wantsOptimizedAudio = file.type.startsWith("video/") || Boolean(activeClip) || shouldUseSegmentedTranscription;
                         const params = new URLSearchParams({ language: deepgramLanguage, punctuate: "true" });
                         const url = "https://api.deepgram.com/v1/listen?" + params.toString();
@@ -2381,7 +2475,7 @@ window.AppModule1 = (() => {
                             activeClip
                                 ? "Preparando audio del clip seleccionado..."
                                 : wantsOptimizedAudio
-                                ? "Preparando audio optimizado para videos pesados..."
+                                ? "Preparando transcripción resistente para conexiones lentas..."
                                 : baseStatusMessages.upload,
                             true,
                         );
@@ -2415,7 +2509,11 @@ window.AppModule1 = (() => {
                             let transcriptionResult = null;
                             try {
                                 if (shouldUseSegmentedTranscription) {
-                                    const segments = buildTranscriptionSegments(videoDuration || 0, 300);
+                                    const segments = buildTranscriptionSegmentsForRange(
+                                        currentRangeStart,
+                                        currentRangeEnd,
+                                        preferredSegmentDuration,
+                                    );
                                     transcriptionResult = await transcribeVideoInSegments(
                                         file,
                                         segments,
@@ -2424,6 +2522,7 @@ window.AppModule1 = (() => {
                                         pBar,
                                         pText,
                                         subtitleLanguage,
+                                        currentRangeDuration,
                                     );
                                 } else {
                                     const json = await transcribeBlobWithRetries(
