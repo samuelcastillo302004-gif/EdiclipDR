@@ -1440,6 +1440,11 @@ window.AppModule1 = (() => {
                         ].join("::");
                     }
 
+                    function getFileExtension(fileName) {
+                        const match = String(fileName || "").match(/\.([a-z0-9]+)$/i);
+                        return match ? match[0].toLowerCase() : "";
+                    }
+
                     function resampleMonoChannel(channelData, sourceRate, targetRate) {
                         if (sourceRate === targetRate) {
                             return channelData;
@@ -1551,6 +1556,14 @@ window.AppModule1 = (() => {
                         );
                     }
 
+                    function ensureUsableTranscriptionBlob(blob, label = "audio") {
+                        const minBytes = 512;
+                        if (!blob || typeof blob.size !== "number" || blob.size < minBytes) {
+                            throw new Error("No se pudo generar un " + label + " valido para transcribir.");
+                        }
+                        return blob;
+                    }
+
                     async function getDecodedAudioBuffer(file) {
                         const fileCacheKey = getFileCacheKey(file);
                         if (decodedAudioCacheKey === fileCacheKey && decodedAudioBufferPromise) {
@@ -1611,7 +1624,7 @@ window.AppModule1 = (() => {
                         try {
                             const ffmpeg = await getSharedFfmpeg();
                             const stamp = Date.now().toString(36);
-                            const inputName = `transcribe_input_${stamp}`;
+                            const inputName = `transcribe_input_${stamp}${getFileExtension(file.name)}`;
                             const outputName = `transcribe_audio_${stamp}.wav`;
                             const inputBytes = new Uint8Array(await file.arrayBuffer());
 
@@ -1635,6 +1648,7 @@ window.AppModule1 = (() => {
                                       "-ac", "1",
                                       "-ar", "16000",
                                       "-c:a", "pcm_s16le",
+                                                                            "-f", "wav",
                                       outputName,
                                   ]
                                 : [
@@ -1644,6 +1658,7 @@ window.AppModule1 = (() => {
                                       "-ac", "1",
                                       "-ar", "16000",
                                       "-c:a", "pcm_s16le",
+                                                                            "-f", "wav",
                                       outputName,
                                   ];
 
@@ -1652,12 +1667,14 @@ window.AppModule1 = (() => {
                             setProgress(progressBarEl, progressTextEl, 25);
                             const data = await ffmpeg.readFile(outputName);
                             const optimizedBlob = new Blob([data], { type: "audio/wav" });
+                            ensureUsableTranscriptionBlob(optimizedBlob);
                             return new File([optimizedBlob], file.name.replace(/\.[^.]+$/, "") + "_transcripcion.wav", {
                                 type: "audio/wav",
                                 lastModified: Date.now(),
                             });
                         } catch (error) {
-                            return await createWavFallbackFromDecodedAudio(file, clipRange, progressBarEl, progressTextEl);
+                            const fallbackFile = await createWavFallbackFromDecodedAudio(file, clipRange, progressBarEl, progressTextEl);
+                            return ensureUsableTranscriptionBlob(fallbackFile);
                         }
                     }
 
@@ -2383,8 +2400,10 @@ window.AppModule1 = (() => {
                                     uploadStartPercent = 25;
                                 } catch (preprocessError) {
                                     console.warn("No se pudo optimizar el audio antes de subirlo:", preprocessError);
-                                    if (activeClip) {
-                                        throw new Error("No se pudo preparar el clip seleccionado para transcribirlo.");
+                                    if (file.type.startsWith("video/")) {
+                                        throw new Error(
+                                            "No se pudo extraer un audio compatible desde este video en este navegador. Prueba Chrome actualizado o sirve la app desde http://localhost en vez de abrirla como archivo local.",
+                                        );
                                     }
                                     setProgress(pBar, pText, 0, { force: true });
                                     updateStatus("No se pudo optimizar el audio; probando subida directa...", true);
