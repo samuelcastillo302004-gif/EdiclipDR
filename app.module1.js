@@ -614,6 +614,7 @@ window.AppModule1 = (() => {
                     // Inicializar Firebase
                     firebase.initializeApp(firebaseConfig);
                     const auth = firebase.auth();
+                    const storage = firebase.storage();
                     let pendingRegistrationData = null;
 
                     const loginScreen = document.getElementById('login-screen');
@@ -991,6 +992,10 @@ window.AppModule1 = (() => {
                     let fullVideoSubtitleData = null;
                     let decodedAudioCacheKey = null;
                     let decodedAudioBufferPromise = null;
+                    let uploadedTranscriptionSourceCache = {
+                        key: null,
+                        url: null,
+                    };
 
                     const subtitleLanguageBaseCodes = [
                         "es", "en", "fr", "de", "it", "pt", "ru", "uk", "pl", "nl", "sv", "no", "da", "fi", "is", "ga", "cy", "et", "lv", "lt",
@@ -1269,6 +1274,12 @@ window.AppModule1 = (() => {
                         return 90;
                     }
 
+                    function shouldUseRemoteStorageTranscription(file, duration) {
+                        if (!file || !file.type.startsWith("video/")) return false;
+                        const sizeMb = (file.size || 0) / (1024 * 1024);
+                        return sizeMb >= 180 || duration >= 20 * 60;
+                    }
+
                     async function buildCuesFromDeepgramResponse(json, duration, subtitleLanguage) {
                         const transcript =
                             json?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
@@ -1339,6 +1350,117 @@ window.AppModule1 = (() => {
                             }
                         }
                         throw lastError || new Error("No se pudo transcribir el audio.");
+                    }
+
+                    async function uploadVideoToFirebaseStorage(file, progressBarEl, progressTextEl) {
+                        const fileCacheKey = getFileCacheKey(file);
+                        if (uploadedTranscriptionSourceCache.key === fileCacheKey && uploadedTranscriptionSourceCache.url) {
+                            return uploadedTranscriptionSourceCache.url;
+                        }
+
+                        const safeName = (file.name || "video")
+                            .replace(/[^a-z0-9._-]+/gi, "_")
+                            .replace(/^_+|_+$/g, "");
+                        const storagePath = [
+                            "transcriptions",
+                            Date.now().toString(),
+                            Math.random().toString(36).slice(2, 10) + "_" + safeName,
+                        ].join("/");
+                        const storageRef = storage.ref().child(storagePath);
+                        const metadata = {
+                            contentType: file.type || "video/mp4",
+                            cacheControl: "public,max-age=3600",
+                        };
+
+                        updateStatus("Subiendo video pesado de forma reanudable...", true);
+                        setProgress(progressBarEl, progressTextEl, 4, { force: true });
+
+                        const downloadUrl = await new Promise((resolve, reject) => {
+                            const uploadTask = storageRef.put(file, metadata);
+
+                            uploadTask.on(
+                                "state_changed",
+                                (snapshot) => {
+                                    const totalBytes = snapshot.totalBytes || file.size || 1;
+                                    const uploadedRatio = Math.max(0, Math.min(1, snapshot.bytesTransferred / totalBytes));
+                                    const progressValue = mapProgress(uploadedRatio, 4, 55);
+                                    setProgress(progressBarEl, progressTextEl, progressValue);
+
+                                    if (snapshot.state === firebase.storage.TaskState.PAUSED) {
+                                        updateStatus("Subida pausada por la red. Reanudando automáticamente...", true);
+                                    } else {
+                                        updateStatus("Subiendo video pesado a almacenamiento seguro...", true);
+                                    }
+                                },
+                                (error) => {
+                                    reject(error);
+                                },
+                                async () => {
+                                    try {
+                                        const url = await uploadTask.snapshot.ref.getDownloadURL();
+                                        resolve(url);
+                                    } catch (error) {
+                                        reject(error);
+                                    }
+                                },
+                            );
+                        });
+
+                        uploadedTranscriptionSourceCache = {
+                            key: fileCacheKey,
+                            url: downloadUrl,
+                        };
+                        return downloadUrl;
+                    }
+
+                    async function transcribeRemoteUrlWithDeepgram(mediaUrl, url, apiKey, progressBarEl, progressTextEl, statusMessages, uploadStartPercent) {
+                        const processingStart = Math.max(55, uploadStartPercent || 55);
+                        let processingInterval = null;
+
+                        try {
+                            return await new Promise((resolve, reject) => {
+                                const xhr = new XMLHttpRequest();
+                                xhr.open("POST", url);
+                                xhr.timeout = 20 * 60 * 1000;
+                                xhr.setRequestHeader("Authorization", "Token " + apiKey);
+                                xhr.setRequestHeader("Content-Type", "application/json");
+
+                                updateStatus(statusMessages.remoteProcessing || "Enviando URL segura a Deepgram...", true);
+                                setProgress(progressBarEl, progressTextEl, processingStart);
+
+                                processingInterval = setInterval(() => {
+                                    const currentValue = parseFloat(progressBarEl.style.width) || processingStart;
+                                    if (currentValue < 96) {
+                                        const nextValue = currentValue + Math.max(0.8, (96 - currentValue) * 0.08);
+                                        setProgress(progressBarEl, progressTextEl, nextValue);
+                                    }
+                                }, 900);
+
+                                xhr.onload = () => {
+                                    if (processingInterval) clearInterval(processingInterval);
+                                    if (xhr.status >= 200 && xhr.status < 300) {
+                                        try {
+                                            resolve(JSON.parse(xhr.responseText));
+                                        } catch (error) {
+                                            reject(new Error("Respuesta inválida de Deepgram."));
+                                        }
+                                    } else {
+                                        reject({ status: xhr.status, text: xhr.responseText });
+                                    }
+                                };
+                                xhr.onerror = () => {
+                                    if (processingInterval) clearInterval(processingInterval);
+                                    reject(new Error("Error de red"));
+                                };
+                                xhr.ontimeout = () => {
+                                    if (processingInterval) clearInterval(processingInterval);
+                                    reject(new Error("Timeout consultando Deepgram por URL"));
+                                };
+                                xhr.send(JSON.stringify({ url: mediaUrl }));
+                            });
+                        } finally {
+                            if (processingInterval) clearInterval(processingInterval);
+                        }
                     }
 
                     async function transcribeSegmentRange(file, segment, requestConfig) {
@@ -2151,6 +2273,7 @@ window.AppModule1 = (() => {
                         fullVideoSubtitleData = null;
                         decodedAudioCacheKey = null;
                         decodedAudioBufferPromise = null;
+                        uploadedTranscriptionSourceCache = { key: null, url: null };
                         selectedClip = null;
                         isViewingClip = false;
                         showFileInfo(file);
@@ -2246,6 +2369,7 @@ window.AppModule1 = (() => {
                         fullVideoSubtitleData = null;
                         decodedAudioCacheKey = null;
                         decodedAudioBufferPromise = null;
+                        uploadedTranscriptionSourceCache = { key: null, url: null };
                         selectedClip = null;
                         isViewingClip = false;
                         setTranscriptPreviewText("");
@@ -2446,6 +2570,7 @@ window.AppModule1 = (() => {
                         const currentRangeEnd = activeClip ? activeClip.end : videoDuration || 0;
                         const currentRangeDuration = Math.max(0, currentRangeEnd - currentRangeStart);
                         const preferredSegmentDuration = getPreferredTranscriptionSegmentDuration(file, currentRangeDuration || videoDuration || 0);
+                        const shouldUseRemoteTranscription = !activeClip && shouldUseRemoteStorageTranscription(file, currentRangeDuration || videoDuration || 0);
                         const shouldUseSegmentedTranscription = file.type.startsWith("video/") && currentRangeDuration > 0;
                         const wantsOptimizedAudio = file.type.startsWith("video/") || Boolean(activeClip) || shouldUseSegmentedTranscription;
                         const params = new URLSearchParams({ language: deepgramLanguage, punctuate: "true" });
@@ -2469,11 +2594,17 @@ window.AppModule1 = (() => {
                                     : subtitleLanguage.code === "es"
                                     ? "Procesando audio en Español..."
                                     : "Transcribiendo en español y preparando traducción...",
+                            remoteProcessing:
+                                subtitleLanguage.code === "es"
+                                    ? "Deepgram está leyendo el video desde almacenamiento seguro..."
+                                    : "Deepgram está leyendo el video y preparando la traducción...",
                         };
         
                         updateStatus(
                             activeClip
                                 ? "Preparando audio del clip seleccionado..."
+                                : shouldUseRemoteTranscription
+                                ? "Preparando transcripción por URL para videos pesados..."
                                 : wantsOptimizedAudio
                                 ? "Preparando transcripción resistente para conexiones lentas..."
                                 : baseStatusMessages.upload,
@@ -2508,7 +2639,23 @@ window.AppModule1 = (() => {
 
                             let transcriptionResult = null;
                             try {
-                                if (shouldUseSegmentedTranscription) {
+                                if (shouldUseRemoteTranscription) {
+                                    const remoteMediaUrl = await uploadVideoToFirebaseStorage(file, pBar, pText);
+                                    const json = await transcribeRemoteUrlWithDeepgram(
+                                        remoteMediaUrl,
+                                        url,
+                                        DEEPGRAM_API_KEY,
+                                        pBar,
+                                        pText,
+                                        baseStatusMessages,
+                                        55,
+                                    );
+                                    transcriptionResult = await buildCuesFromDeepgramResponse(
+                                        json,
+                                        videoDuration || currentRangeDuration || 30,
+                                        subtitleLanguage,
+                                    );
+                                } else if (shouldUseSegmentedTranscription) {
                                     const segments = buildTranscriptionSegmentsForRange(
                                         currentRangeStart,
                                         currentRangeEnd,
@@ -2541,36 +2688,69 @@ window.AppModule1 = (() => {
                                     );
                                 }
                             } catch (firstError) {
+                                const canFallbackToSegmentedVideo =
+                                    file.type.startsWith("video/") &&
+                                    currentRangeDuration > 0 &&
+                                    (shouldUseRemoteTranscription || shouldUseSegmentedTranscription);
                                 const shouldRetryWithOptimizedAudio =
                                     !wantsOptimizedAudio &&
                                     file.type.startsWith("video/") &&
                                     ((firstError?.status === 504) || String(firstError?.message || "").toLowerCase().includes("red") || isDeepgramDecodeError(firstError));
 
-                                if (!shouldRetryWithOptimizedAudio) throw firstError;
+                                if (canFallbackToSegmentedVideo) {
+                                    console.warn("Fallo la transcripcion remota; usando segmentos locales como respaldo:", firstError);
+                                    updateStatus(
+                                        "La ruta rápida del video pesado falló; continuando con segmentos más pequeños para evitar errores...",
+                                        true,
+                                    );
+                                    setProgress(pBar, pText, Math.max(12, parseFloat(pBar.style.width) || 12));
+                                    const fallbackSegments = buildTranscriptionSegmentsForRange(
+                                        currentRangeStart,
+                                        currentRangeEnd,
+                                        Math.min(preferredSegmentDuration, 60),
+                                    );
+                                    transcriptionResult = await transcribeVideoInSegments(
+                                        file,
+                                        fallbackSegments,
+                                        url,
+                                        DEEPGRAM_API_KEY,
+                                        pBar,
+                                        pText,
+                                        subtitleLanguage,
+                                        currentRangeDuration,
+                                    );
+                                    firstError = null;
+                                }
 
-                                updateStatus(
-                                    isDeepgramDecodeError(firstError)
-                                        ? "Deepgram no pudo decodificar el video; reintentando con WAV estable..."
-                                        : "Deepgram tardó demasiado; reintentando con audio optimizado...",
-                                    true,
-                                );
-                                setProgress(pBar, pText, 5);
-                                transcriptionSource = await createOptimizedAudioForTranscription(file, pBar, pText);
-                                updateStatus(baseStatusMessages.optimizedUpload, true);
-                                const json = await transcribeBlobWithRetries(
-                                    transcriptionSource,
-                                    url,
-                                    DEEPGRAM_API_KEY,
-                                    pBar,
-                                    pText,
-                                    baseStatusMessages,
-                                    25,
-                                );
-                                transcriptionResult = await buildCuesFromDeepgramResponse(
-                                    json,
-                                    activeClip ? activeClip.dur : videoDuration || 30,
-                                    subtitleLanguage,
-                                );
+                                if (transcriptionResult) {
+                                    // El respaldo por segmentos resolvió la transcripción.
+                                } else {
+                                    if (!shouldRetryWithOptimizedAudio) throw firstError;
+
+                                    updateStatus(
+                                        isDeepgramDecodeError(firstError)
+                                            ? "Deepgram no pudo decodificar el video; reintentando con WAV estable..."
+                                            : "Deepgram tardó demasiado; reintentando con audio optimizado...",
+                                        true,
+                                    );
+                                    setProgress(pBar, pText, 5);
+                                    transcriptionSource = await createOptimizedAudioForTranscription(file, pBar, pText);
+                                    updateStatus(baseStatusMessages.optimizedUpload, true);
+                                    const json = await transcribeBlobWithRetries(
+                                        transcriptionSource,
+                                        url,
+                                        DEEPGRAM_API_KEY,
+                                        pBar,
+                                        pText,
+                                        baseStatusMessages,
+                                        25,
+                                    );
+                                    transcriptionResult = await buildCuesFromDeepgramResponse(
+                                        json,
+                                        activeClip ? activeClip.dur : videoDuration || 30,
+                                        subtitleLanguage,
+                                    );
+                                }
                             }
         
                             // Al recibir respuesta, completamos al 100%
