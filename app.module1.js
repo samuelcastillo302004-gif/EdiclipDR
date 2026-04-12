@@ -531,7 +531,7 @@ window.AppModule1 = (() => {
                     </div>
                     <div class="preview-center">
                         <div class="video-container" id="videoContainer">
-                            <canvas id="canvas" width="720" height="1280" style="position:absolute;left:0;top:0;width:100%;height:100%;z-index:5"></canvas>
+                            <canvas id="canvas" width="1080" height="1920" style="position:absolute;left:0;top:0;width:100%;height:100%;z-index:5"></canvas>
                             <video id="video" playsinline style="position:fixed;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none"></video>
                             <div class="overlay-top"></div>
                             <div class="overlay-bottom"></div>
@@ -4068,7 +4068,8 @@ window.AppModule1 = (() => {
                             await seekVideoToTime(startTime);
                             await videoEl.play().catch(err => console.warn("Play:", err));
         
-                            const vStream = canvas.captureStream(30);
+                            const exportFps = Math.max(30, Math.min(60, Math.round(videoEl.getVideoPlaybackQuality?.().totalVideoFrames ? 60 : 30)));
+                            const vStream = canvas.captureStream(exportFps);
                             try {
                                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                                 if (audioCtx.state === 'suspended') await audioCtx.resume();
@@ -4110,9 +4111,19 @@ window.AppModule1 = (() => {
                             }
         
                             exportChunks = [];
-                            // Grabación optimizada: forzar alta tasa de bits para evitar congelamientos
-                            let options = { mimeType: 'video/webm;codecs=vp9,opus', videoBitsPerSecond: 8000000 };
-                            if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm;codecs=vp8,opus', videoBitsPerSecond: 8000000 };
+                            // Grabación optimizada para exportar con más nitidez.
+                            let options = {
+                                mimeType: 'video/webm;codecs=vp9,opus',
+                                videoBitsPerSecond: 22000000,
+                                audioBitsPerSecond: 192000,
+                            };
+                            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                                options = {
+                                    mimeType: 'video/webm;codecs=vp8,opus',
+                                    videoBitsPerSecond: 18000000,
+                                    audioBitsPerSecond: 192000,
+                                };
+                            }
                             if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
                             
                             try {
@@ -4169,12 +4180,22 @@ window.AppModule1 = (() => {
         
                                         await ffmpeg.writeFile('input.webm', new Uint8Array(await webmBlob.arrayBuffer()));
                                         
-                                        // Forzar tasa de fotogramas constante (-r 30) para eliminar tartamudeos
+                                        // Exportación MP4 de mayor calidad con tasa de bits menos agresiva.
                                         await ffmpeg.exec([
                                             '-i', 'input.webm',
-                                            '-r', '30',
-                                            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p',
-                                            '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+                                            '-r', String(exportFps),
+                                            '-c:v', 'libx264',
+                                            '-preset', 'medium',
+                                            '-crf', '14',
+                                            '-pix_fmt', 'yuv420p',
+                                            '-profile:v', 'high',
+                                            '-level', '4.2',
+                                            '-b:v', '20M',
+                                            '-maxrate', '24M',
+                                            '-bufsize', '40M',
+                                            '-c:a', 'aac',
+                                            '-b:a', '192k',
+                                            '-ar', '48000',
                                             '-movflags', '+faststart', 'output.mp4'
                                         ]);
         
@@ -4201,7 +4222,7 @@ window.AppModule1 = (() => {
                                 setTimeout(() => URL.revokeObjectURL(url), 2000);
                             }
         
-                            exportRecorder.start();
+                            exportRecorder.start(1000);
                             updateStatus('Exportando video...', true);
         
                         } catch (error) {
