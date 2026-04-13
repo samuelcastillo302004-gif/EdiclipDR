@@ -511,8 +511,11 @@ window.AppModule1 = (() => {
 
                     <div class="editor-left-footer">
                         <button class="btn-action primary-action download-btn" id="downloadBtn" disabled>
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Descargar Short
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Descargar WebM HQ
                         </button>
+                        <div class="footer-info" style="margin-top: 10px">
+                            <div class="small" style="margin-bottom: 8px">La descarga exporta WebM subtitulado en alta calidad directamente desde el editor, sin Publitio.</div>
+                        </div>
                     </div>
                 </div>
 
@@ -531,7 +534,7 @@ window.AppModule1 = (() => {
                     </div>
                     <div class="preview-center">
                         <div class="video-container" id="videoContainer">
-                            <canvas id="canvas" width="1080" height="1920" style="position:absolute;left:0;top:0;width:100%;height:100%;z-index:5"></canvas>
+                            <canvas id="canvas" width="720" height="1280" style="position:absolute;left:0;top:0;width:100%;height:100%;z-index:5"></canvas>
                             <video id="video" playsinline style="position:fixed;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none"></video>
                             <div class="overlay-top"></div>
                             <div class="overlay-bottom"></div>
@@ -1053,6 +1056,12 @@ window.AppModule1 = (() => {
                     let raf = null;
                     const CANVAS_W = canvas.width;
                     const CANVAS_H = canvas.height;
+                    const TARGET_EXPORT_FPS = 24;
+                    const TARGET_EXPORT_VIDEO_BITRATE = 8000000;
+                    const TARGET_EXPORT_AUDIO_BITRATE = 160000;
+
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = "high";
         
                     // Global audio context handling
                     let audioCtx = null;
@@ -1353,11 +1362,12 @@ window.AppModule1 = (() => {
 
                     function getPreferredTranscriptionSegmentDuration(file, totalDuration) {
                         const sizeMb = (file?.size || 0) / (1024 * 1024);
-                        if (sizeMb >= 900 || totalDuration >= 150 * 60) return 35;
-                        if (sizeMb >= 500 || totalDuration >= 90 * 60) return 40;
-                        if (sizeMb >= 250 || totalDuration >= 45 * 60) return 22;
-                        if (sizeMb >= 120 || totalDuration >= 20 * 60) return 28;
-                        if (sizeMb >= 60 || totalDuration >= 10 * 60) return 35;
+                        if (sizeMb >= 900 || totalDuration >= 150 * 60) return 12;
+                        if (sizeMb >= 500 || totalDuration >= 90 * 60) return 12;
+                        if (sizeMb >= 250 || totalDuration >= 45 * 60) return 15;
+                        if (sizeMb >= 180 || totalDuration >= 30 * 60) return 18;
+                        if (sizeMb >= 120 || totalDuration >= 20 * 60) return 20;
+                        if (sizeMb >= 60 || totalDuration >= 10 * 60) return 25;
                         return 45;
                     }
 
@@ -1431,6 +1441,7 @@ window.AppModule1 = (() => {
 
                     async function transcribeBlobWithRetries(blob, url, apiKey, progressBarEl, progressTextEl, statusMessages, uploadStartPercent, maxAttempts = 10) {
                         let lastError = null;
+                        let retryProgressFloor = Math.max(0, Number(uploadStartPercent) || 0);
                         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                             try {
                                 return await transcribeBlobWithDeepgram(
@@ -1440,19 +1451,22 @@ window.AppModule1 = (() => {
                                     progressBarEl,
                                     progressTextEl,
                                     statusMessages,
-                                    uploadStartPercent,
+                                    retryProgressFloor,
                                 );
                             } catch (error) {
                                 lastError = error;
-                                if (!shouldRetryDeepgramError(error) || attempt === maxAttempts) {
+                                if (!(shouldRetryDeepgramError(error) || isDeepgramDecodeError(error)) || attempt === maxAttempts) {
                                     throw error;
                                 }
                                 const retryDelay = getDeepgramRetryDelay(attempt);
+                                retryProgressFloor = Math.max(retryProgressFloor, parseFloat(progressBarEl?.style?.width || "0") || 0);
                                 updateStatus(
-                                    "Conexion inestable. Reintentando automaticamente en " + Math.ceil(retryDelay / 1000) + "s (intento " + attempt + " de " + maxAttempts + ")...",
+                                    isDeepgramDecodeError(error)
+                                        ? "Deepgram rechazó este tramo; reintentando automáticamente sin bajar el progreso (intento " + attempt + " de " + maxAttempts + ")..."
+                                        : "Conexion inestable. Reintentando automaticamente en " + Math.ceil(retryDelay / 1000) + "s (intento " + attempt + " de " + maxAttempts + ")...",
                                     true,
                                 );
-                                setProgress(progressBarEl, progressTextEl, Math.max(uploadStartPercent, 25));
+                                setProgress(progressBarEl, progressTextEl, retryProgressFloor);
                                 await waitForDeepgramRetry(retryDelay);
                             }
                         }
@@ -1698,16 +1712,37 @@ window.AppModule1 = (() => {
                         setTranscriptPreviewText(fullVideoSubtitleData?.previewText || "");
                     }
 
+                    async function ensureFfmpegLibraryAvailable() {
+                        const existingLib = window.FFmpegWasm || window.FFmpeg;
+                        if (existingLib) return existingLib;
+
+                        if (!window.__ediclipFfmpegScriptPromise) {
+                            window.__ediclipFfmpegScriptPromise = new Promise((resolve, reject) => {
+                                const script = document.createElement('script');
+                                script.src = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js';
+                                script.async = true;
+                                script.onload = () => {
+                                    const loadedLib = window.FFmpegWasm || window.FFmpeg;
+                                    if (loadedLib) resolve(loadedLib);
+                                    else reject(new Error('La libreria FFmpeg no se pudo inicializar.'));
+                                };
+                                script.onerror = () => reject(new Error('No se pudo cargar la libreria FFmpeg desde la red.'));
+                                document.head.appendChild(script);
+                            }).catch((error) => {
+                                window.__ediclipFfmpegScriptPromise = null;
+                                throw error;
+                            });
+                        }
+
+                        return await window.__ediclipFfmpegScriptPromise;
+                    }
+
                     async function getSharedFfmpeg() {
                         if (sharedFfmpeg) return sharedFfmpeg;
                         if (sharedFfmpegLoadPromise) return sharedFfmpegLoadPromise;
 
-                        const ffmpegLib = window.FFmpegWasm || window.FFmpeg;
-                        if (!ffmpegLib) {
-                            throw new Error("FFmpeg no está disponible en este navegador.");
-                        }
-
                         sharedFfmpegLoadPromise = (async () => {
+                            const ffmpegLib = await ensureFfmpegLibraryAvailable();
                             const { FFmpeg, toBlobURL } = ffmpegLib;
                             const ffmpeg = new FFmpeg();
                             const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd";
@@ -1727,12 +1762,56 @@ window.AppModule1 = (() => {
                         return sharedFfmpegLoadPromise;
                     }
 
+                    async function normalizeRecordedWebm(blob) {
+                        const ffmpeg = await getSharedFfmpeg();
+                        const stamp = Date.now().toString(36);
+                        const inputName = `export_raw_${stamp}.webm`;
+                        const outputName = `export_stable_${stamp}.webm`;
+                        const inputBytes = new Uint8Array(await blob.arrayBuffer());
+
+                        await ffmpeg.writeFile(inputName, inputBytes);
+                        await ffmpeg.exec([
+                            '-fflags', '+genpts',
+                            '-i', inputName,
+                            '-map', '0:v:0',
+                            '-map', '0:a:0?',
+                            '-vsync', 'cfr',
+                            '-r', String(TARGET_EXPORT_FPS),
+                            '-c:v', 'libvpx',
+                            '-b:v', '8M',
+                            '-maxrate', '8M',
+                            '-bufsize', '16M',
+                            '-g', '48',
+                            '-keyint_min', '48',
+                            '-deadline', 'good',
+                            '-cpu-used', '4',
+                            '-pix_fmt', 'yuv420p',
+                            '-c:a', 'libopus',
+                            '-b:a', '160k',
+                            '-ar', '48000',
+                            '-ac', '2',
+                            outputName,
+                        ]);
+
+                        const data = await ffmpeg.readFile(outputName);
+                        const stableBlob = new Blob([data], { type: 'video/webm' });
+                        if (!stableBlob.size) {
+                            throw new Error('No se pudo estabilizar el WebM exportado.');
+                        }
+                        return stableBlob;
+                    }
+
                     function setProgress(progressBarEl, progressTextEl, value, options = {}) {
                         const safeValue = Math.max(0, Math.min(100, value));
                         const currentValue = parseFloat(progressBarEl.style.width) || 0;
                         const nextValue = options.force ? safeValue : Math.max(currentValue, safeValue);
                         progressBarEl.style.width = nextValue + "%";
                         progressTextEl.textContent = Math.round(nextValue) + "%";
+                    }
+
+                    function getProgressValue(progressBarEl, fallback = 0) {
+                        const currentValue = parseFloat(progressBarEl?.style?.width || "");
+                        return Number.isFinite(currentValue) ? currentValue : fallback;
                     }
 
                     function mapProgress(value, from, to) {
@@ -1940,7 +2019,7 @@ window.AppModule1 = (() => {
                             const ffmpeg = await getSharedFfmpeg();
                             const stamp = Date.now().toString(36);
                             const inputName = `transcribe_input_${stamp}${getFileExtension(file.name)}`;
-                            const outputName = `transcribe_audio_${stamp}.wav`;
+                            const outputName = `transcribe_audio_${stamp}.mp3`;
                             const inputBytes = new Uint8Array(await file.arrayBuffer());
 
                             setProgress(progressBarEl, progressTextEl, 5);
@@ -1962,8 +2041,10 @@ window.AppModule1 = (() => {
                                       "-map", "0:a:0?",
                                       "-ac", "1",
                                       "-ar", "16000",
-                                      "-c:a", "pcm_s16le",
-                                                                            "-f", "wav",
+                                      "-c:a", "libmp3lame",
+                                      "-b:a", "24k",
+                                      "-compression_level", "0",
+                                      "-f", "mp3",
                                       outputName,
                                   ]
                                 : [
@@ -1972,8 +2053,10 @@ window.AppModule1 = (() => {
                                       "-map", "0:a:0?",
                                       "-ac", "1",
                                       "-ar", "16000",
-                                      "-c:a", "pcm_s16le",
-                                                                            "-f", "wav",
+                                      "-c:a", "libmp3lame",
+                                      "-b:a", "24k",
+                                      "-compression_level", "0",
+                                      "-f", "mp3",
                                       outputName,
                                   ];
 
@@ -1981,10 +2064,10 @@ window.AppModule1 = (() => {
 
                             setProgress(progressBarEl, progressTextEl, 25);
                             const data = await ffmpeg.readFile(outputName);
-                            const optimizedBlob = new Blob([data], { type: "audio/wav" });
+                            const optimizedBlob = new Blob([data], { type: "audio/mpeg" });
                             ensureUsableTranscriptionBlob(optimizedBlob);
-                            return new File([optimizedBlob], file.name.replace(/\.[^.]+$/, "") + "_transcripcion.wav", {
-                                type: "audio/wav",
+                            return new File([optimizedBlob], file.name.replace(/\.[^.]+$/, "") + "_transcripcion.mp3", {
+                                type: "audio/mpeg",
                                 lastModified: Date.now(),
                             });
                         } catch (error) {
@@ -2738,7 +2821,7 @@ window.AppModule1 = (() => {
                                             "No se pudo extraer un audio compatible desde este video en este navegador. Prueba Chrome actualizado o sirve la app desde http://localhost en vez de abrirla como archivo local.",
                                         );
                                     }
-                                    setProgress(pBar, pText, 0, { force: true });
+                                    setProgress(pBar, pText, getProgressValue(pBar, 0));
                                     updateStatus("No se pudo optimizar el audio; probando subida directa...", true);
                                     transcriptionSource = file;
                                     uploadStartPercent = 0;
@@ -2837,11 +2920,11 @@ window.AppModule1 = (() => {
 
                                     updateStatus(
                                         isDeepgramDecodeError(firstError)
-                                            ? "Deepgram no pudo decodificar el video; reintentando con WAV estable..."
+                                            ? "Deepgram no pudo decodificar el tramo; reintentando con audio más ligero sin bajar el progreso..."
                                             : "Deepgram tardó demasiado; reintentando con audio optimizado...",
                                         true,
                                     );
-                                    setProgress(pBar, pText, 5);
+                                    setProgress(pBar, pText, getProgressValue(pBar, 5));
                                     transcriptionSource = await createOptimizedAudioForTranscription(file, pBar, pText);
                                     updateStatus(baseStatusMessages.optimizedUpload, true);
                                     const json = await transcribeBlobWithRetries(
@@ -2909,7 +2992,7 @@ window.AppModule1 = (() => {
                             }, 600);
         
                             videoEl.currentTime = activeClip ? activeClip.start : 0;
-                            await videoEl.play();
+                            await safePlayVideo("No se pudo reanudar el video después de generar los subtítulos.");
                         } catch (err) {
                             loaderWrap.style.display = "none";
                             const status = err.status || 0;
@@ -2978,6 +3061,17 @@ window.AppModule1 = (() => {
                         }
                         return out;
                     }
+
+                    async function safePlayVideo(messageOnError) {
+                        try {
+                            await videoEl.play();
+                            return true;
+                        } catch (playError) {
+                            console.error("No se pudo reproducir el video:", playError);
+                            updateStatus(messageOnError || "No se pudo reproducir el video.", false);
+                            return false;
+                        }
+                    }
         
                     // Play/Pause button
                     playBtn.addEventListener("click", async () => {
@@ -2986,10 +3080,22 @@ window.AppModule1 = (() => {
                             return;
                         }
                         if (videoEl.paused || videoEl.ended) {
-                            await videoEl.play();
+                            await safePlayVideo("El navegador no pudo iniciar la reproducción del video.");
                         } else {
                             videoEl.pause();
                         }
+                    });
+
+                    videoEl.addEventListener("error", () => {
+                        const mediaError = videoEl.error;
+                        const errorCode = mediaError?.code || 0;
+                        const errorMap = {
+                            1: "La carga del video se canceló antes de completarse.",
+                            2: "Hubo un problema de red al cargar el video.",
+                            3: "El navegador no pudo decodificar este archivo de video.",
+                            4: "El formato del video no es compatible con este navegador.",
+                        };
+                        updateStatus(errorMap[errorCode] || "Ocurrió un error al cargar o reproducir el video.", false);
                     });
         
                     videoEl.addEventListener("timeupdate", () => {
@@ -4052,6 +4158,7 @@ window.AppModule1 = (() => {
                         // DETERMINAR RANGO: Si hay un clip activo, solo descargamos ese rango
                         const startTime = isViewingClip && selectedClip ? selectedClip.start : 0;
                         const endTime = isViewingClip && selectedClip ? selectedClip.end : videoDuration;
+                        const exportDuration = Math.max(0.25, endTime - startTime);
         
                         // Ocultar subtítulos HTML para la grabación (drawSubtitleOnCanvas ya los dibuja)
                         subtitleEl.style.visibility = "hidden";
@@ -4066,10 +4173,14 @@ window.AppModule1 = (() => {
         
                         try {
                             await seekVideoToTime(startTime);
-                            await videoEl.play().catch(err => console.warn("Play:", err));
+                            await safePlayVideo("No se pudo iniciar la reproducción para exportar el video.");
         
-                            const exportFps = Math.max(30, Math.min(60, Math.round(videoEl.getVideoPlaybackQuality?.().totalVideoFrames ? 60 : 30)));
+                            const exportFps = TARGET_EXPORT_FPS;
                             const vStream = canvas.captureStream(exportFps);
+                            const exportVideoTrack = vStream.getVideoTracks()[0];
+                            if (exportVideoTrack) {
+                                exportVideoTrack.contentHint = 'motion';
+                            }
                             try {
                                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                                 if (audioCtx.state === 'suspended') await audioCtx.resume();
@@ -4111,20 +4222,39 @@ window.AppModule1 = (() => {
                             }
         
                             exportChunks = [];
-                            // Grabación optimizada para exportar con más nitidez.
-                            let options = {
-                                mimeType: 'video/webm;codecs=vp9,opus',
-                                videoBitsPerSecond: 22000000,
-                                audioBitsPerSecond: 192000,
-                            };
-                            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                                options = {
+                            // Exportacion directa a WebM de alta calidad, sin conversiones intermedias.
+                            const webmPreferredOptions = [
+                                {
                                     mimeType: 'video/webm;codecs=vp8,opus',
-                                    videoBitsPerSecond: 18000000,
-                                    audioBitsPerSecond: 192000,
+                                    videoBitsPerSecond: TARGET_EXPORT_VIDEO_BITRATE,
+                                    audioBitsPerSecond: TARGET_EXPORT_AUDIO_BITRATE,
+                                },
+                                {
+                                    mimeType: 'video/webm;codecs=vp9,opus',
+                                    videoBitsPerSecond: 7000000,
+                                    audioBitsPerSecond: 160000,
+                                },
+                                {
+                                    mimeType: 'video/webm',
+                                    videoBitsPerSecond: 6000000,
+                                    audioBitsPerSecond: 160000,
+                                },
+                            ];
+
+                            let options = null;
+                            for (const candidate of webmPreferredOptions) {
+                                if (MediaRecorder.isTypeSupported(candidate.mimeType)) {
+                                    options = candidate;
+                                    break;
+                                }
+                            }
+                            if (!options) {
+                                options = {
+                                    mimeType: 'video/webm',
+                                    videoBitsPerSecond: 6000000,
+                                    audioBitsPerSecond: 160000,
                                 };
                             }
-                            if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
                             
                             try {
                                 exportRecorder = new MediaRecorder(combinedStream, options);
@@ -4138,8 +4268,14 @@ window.AppModule1 = (() => {
                             exportRecorder.ondataavailable = (ev) => {
                                 if(ev.data && ev.data.size > 0) exportChunks.push(ev.data);
                             };
-                            exportRecorder.onstop = () => {
-                                processToMp4(exportChunks);
+                            exportRecorder.onstop = async () => {
+                                try {
+                                    await processRecordedVideo(exportChunks);
+                                } catch (processError) {
+                                    console.error('Error finalizando exportacion WEBM:', processError);
+                                    updateStatus(processError?.message || 'No se pudo completar la exportación.', false);
+                                    cleanupDownload();
+                                }
                                 if(combinedStream) combinedStream.getTracks().forEach(t=>t.stop());
                             };
         
@@ -4153,61 +4289,26 @@ window.AppModule1 = (() => {
                                 }
                             }, 100);
         
-                            async function processToMp4(recordedChunks) {
-                                const mimeType = exportRecorder.mimeType;
-                                // Si ya se grabó en mp4 nativamente, descargamos directamente
-                                if (mimeType.includes('mp4')) {
-                                    downloadBlob(new Blob(recordedChunks, { type: mimeType }), 'mp4');
-                                    cleanupDownload();
-                                    return;
+                            async function processRecordedVideo(recordedChunks) {
+                                downloadBtn.innerHTML = '<div style="width:14px;height:14px;border:2px solid rgba(4,32,40,0.3);border-top-color:#042028;border-radius:50%;animation:spin 0.8s linear infinite"></div> Finalizando descarga...';
+                                const recorderMimeType = exportRecorder?.mimeType || options.mimeType || 'video/webm';
+                                const outputBlob = new Blob(recordedChunks, { type: recorderMimeType.includes('webm') ? 'video/webm' : 'video/webm' });
+                                if (!outputBlob.size) {
+                                    throw new Error('La exportación salió vacía.');
                                 }
-        
-                                downloadBtn.innerHTML = '<div style="width:14px;height:14px;border:2px solid rgba(4,32,40,0.3);border-top-color:#042028;border-radius:50%;animation:spin 0.8s linear infinite"></div> Convirtiendo a MP4...';
-                                const webmBlob = new Blob(recordedChunks, { type: 'video/webm' });
-                                
-                                // Lógica para FFmpeg.wasm v0.12.6 (Soporte para MP4 real)
-                                const ffmpegLib = window.FFmpegWasm || window.FFmpeg;
-                                if (ffmpegLib) {
-                                    try {
-                                        const { FFmpeg, toBlobURL } = ffmpegLib;
-                                        const ffmpeg = new FFmpeg();
-                                        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-                                        
-                                        await ffmpeg.load({
-                                            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                                            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-                                        });
-        
-                                        await ffmpeg.writeFile('input.webm', new Uint8Array(await webmBlob.arrayBuffer()));
-                                        
-                                        // Exportación MP4 de mayor calidad con tasa de bits menos agresiva.
-                                        await ffmpeg.exec([
-                                            '-i', 'input.webm',
-                                            '-r', String(exportFps),
-                                            '-c:v', 'libx264',
-                                            '-preset', 'medium',
-                                            '-crf', '14',
-                                            '-pix_fmt', 'yuv420p',
-                                            '-profile:v', 'high',
-                                            '-level', '4.2',
-                                            '-b:v', '20M',
-                                            '-maxrate', '24M',
-                                            '-bufsize', '40M',
-                                            '-c:a', 'aac',
-                                            '-b:a', '192k',
-                                            '-ar', '48000',
-                                            '-movflags', '+faststart', 'output.mp4'
-                                        ]);
-        
-                                        const data = await ffmpeg.readFile('output.mp4');
-                                        downloadBlob(new Blob([data.buffer], { type: 'video/mp4' }), 'mp4');
-                                    } catch (e) {
-                                        console.error("Error FFmpeg (Verifica encabezados COOP/COEP):", e);
-                                        downloadBlob(webmBlob, 'webm');
-                                    }
-                                } else {
-                                    downloadBlob(webmBlob, 'webm');
+
+                                let finalBlob = outputBlob;
+                                try {
+                                    downloadBtn.innerHTML = '<div style="width:14px;height:14px;border:2px solid rgba(4,32,40,0.3);border-top-color:#042028;border-radius:50%;animation:spin 0.8s linear infinite"></div> Estabilizando WebM...';
+                                    updateStatus('Corrigiendo tiempos del WebM para evitar congelamientos...', true);
+                                    finalBlob = await normalizeRecordedWebm(outputBlob);
+                                } catch (normalizeError) {
+                                    console.error('No se pudo estabilizar el WebM; se descargará la captura original:', normalizeError);
+                                    updateStatus('No se pudo estabilizar el WebM; se descargará la captura original.', true);
                                 }
+
+                                updateStatus(`WebM HQ listo para descargar (${CANVAS_W}x${CANVAS_H}).`, true);
+                                downloadBlob(finalBlob, 'webm');
                                 cleanupDownload();
                             }
         
@@ -4222,7 +4323,7 @@ window.AppModule1 = (() => {
                                 setTimeout(() => URL.revokeObjectURL(url), 2000);
                             }
         
-                            exportRecorder.start(1000);
+                            exportRecorder.start(250);
                             updateStatus('Exportando video...', true);
         
                         } catch (error) {
@@ -4235,7 +4336,7 @@ window.AppModule1 = (() => {
                     function cleanupDownload() {
                         isRecording = false;
                         subtitleEl.style.visibility = "visible";
-                        downloadBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Descargar Short';
+                        downloadBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Descargar WebM HQ';
                         downloadBtn.disabled = false;
                         updateStatus('Listo para otra edición', true);
                     }
