@@ -331,13 +331,13 @@ window.AppModule1 = (() => {
                                         stroke="currentColor"
                                         stroke-width="2.5"
                                     >
-                                        <circle cx="12" cy="12" r="10" />
-                                        <polygon
-                                            points="10 8 16 12 10 16 10 8"
-                                        />
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                        <polyline points="7 10 12 15 17 10" />
+                                        <line x1="12" y1="15" x2="12" y2="3" />
                                     </svg>
-                                    Local
+                                    Cargar subtítulos
                                 </button>
+                                <input type="file" id="localSubtitleInput" accept=".srt,.vtt,.txt" style="display:none" />
                             </div>
                             <div class="row" style="margin-top: 10px; align-items: center;">
                                 <span class="small" style="min-width: 122px;">Idioma subtítulos</span>
@@ -413,6 +413,9 @@ window.AppModule1 = (() => {
                                 <div class="chip active" data-anim="typewriter">
                                     ⌨ Typewriter
                                 </div>
+                                <div class="chip" data-anim="one-word">
+                                    🧩 Una por palabra
+                                </div>
                                 <div class="chip" data-anim="float">
                                     🫧 Flotando
                                 </div>
@@ -443,6 +446,24 @@ window.AppModule1 = (() => {
                                 </div>
                                 <div class="chip" data-anim="zoom-blur">
                                     🔍 Zoom Blur
+                                </div>
+                                <div class="chip" data-anim="stomp">
+                                    🥾 Stomp
+                                </div>
+                                <div class="chip" data-anim="drift">
+                                    ☄ Drift
+                                </div>
+                                <div class="chip" data-anim="flash-pop">
+                                    ⚡ Flash Pop
+                                </div>
+                                <div class="chip" data-anim="elastic">
+                                    🪄 Elastic
+                                </div>
+                                <div class="chip" data-anim="spin-in">
+                                    🌀 Spin In
+                                </div>
+                                <div class="chip" data-anim="signal">
+                                    📶 Signal
                                 </div>
                             </div>
                         </div>
@@ -513,9 +534,6 @@ window.AppModule1 = (() => {
                         <button class="btn-action primary-action download-btn" id="downloadBtn" disabled>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Descargar WebM HQ
                         </button>
-                        <div class="footer-info" style="margin-top: 10px">
-                            <div class="small" style="margin-bottom: 8px">La descarga exporta WebM subtitulado en alta calidad directamente desde el editor, sin Publitio.</div>
-                        </div>
                     </div>
                 </div>
 
@@ -992,6 +1010,7 @@ window.AppModule1 = (() => {
                     const fileInput = document.getElementById("fileInput");
                     const transcribeBtn = document.getElementById("transcribeBtn");
                     const localBtn = document.getElementById("localBtn");
+                    const localSubtitleInput = document.getElementById("localSubtitleInput");
                     const subtitleLanguageSelect = document.getElementById("subtitleLanguageSelect");
                     const statusEl = document.getElementById("status");
                     const loaderWrap = document.getElementById("loaderWrap");
@@ -1018,6 +1037,7 @@ window.AppModule1 = (() => {
                         fileInput,
                         transcribeBtn,
                         localBtn,
+                        localSubtitleInput,
                         subtitleLanguageSelect,
                         statusEl,
                         loaderWrap,
@@ -1051,7 +1071,8 @@ window.AppModule1 = (() => {
                         throw new Error("No se pudo crear el contexto del canvas.");
                     }
                     
-                    const BLUR_PX = 120;
+                    const BLUR_PX = 82;
+                    const BLUR_BRIGHTNESS = 0.52;
                     const STRIP_HEIGHT = Math.round(canvas.height * 0.30);
                     let raf = null;
                     const CANVAS_W = canvas.width;
@@ -1079,6 +1100,8 @@ window.AppModule1 = (() => {
                     let typingFrameId = null;
                     let activeTypewriterCue = null;
                     let activeTypewriterContainer = null;
+                    let activeSingleWordCue = null;
+                    let activeSingleWordContainer = null;
                     let lastLoadedFile = null;
                     let sharedFfmpeg = null;
                     let sharedFfmpegLoadPromise = null;
@@ -1921,6 +1944,187 @@ window.AppModule1 = (() => {
                         };
                     }
 
+                    function detectSpeechSegmentsFromAudio(decodedBuffer, clipRange = null) {
+                        const { monoSamples, sourceSampleRate } = buildMonoSamplesFromDecodedBuffer(decodedBuffer, clipRange);
+                        const windowDuration = 0.18;
+                        const minSegmentDuration = 0.42;
+                        const minGapDuration = 0.22;
+                        const edgePadding = 0.04;
+                        const samplesPerWindow = Math.max(1, Math.floor(sourceSampleRate * windowDuration));
+                        const energies = [];
+
+                        for (let offset = 0; offset < monoSamples.length; offset += samplesPerWindow) {
+                            const endOffset = Math.min(monoSamples.length, offset + samplesPerWindow);
+                            let energy = 0;
+                            for (let sampleIndex = offset; sampleIndex < endOffset; sampleIndex++) {
+                                const sample = monoSamples[sampleIndex] || 0;
+                                energy += sample * sample;
+                            }
+                            const rms = Math.sqrt(energy / Math.max(1, endOffset - offset));
+                            energies.push(rms);
+                        }
+
+                        if (!energies.length) return [];
+
+                        const sortedEnergies = [...energies].sort((a, b) => a - b);
+                        const noiseFloor = sortedEnergies[Math.floor(sortedEnergies.length * 0.35)] || 0;
+                        const peakEnergy = sortedEnergies[Math.floor(sortedEnergies.length * 0.92)] || noiseFloor;
+                        const threshold = Math.max(0.009, noiseFloor + (peakEnergy - noiseFloor) * 0.18);
+                        const baseOffset = Math.max(0, clipRange?.start || 0);
+                        const rawSegments = [];
+                        let segmentStart = null;
+
+                        energies.forEach((value, index) => {
+                            const windowStart = index * windowDuration;
+                            const windowEnd = Math.min(monoSamples.length / sourceSampleRate, (index + 1) * windowDuration);
+                            const isSpeech = value >= threshold;
+
+                            if (isSpeech && segmentStart === null) {
+                                segmentStart = windowStart;
+                            }
+
+                            if (!isSpeech && segmentStart !== null) {
+                                rawSegments.push({
+                                    start: Math.max(0, segmentStart - edgePadding),
+                                    end: Math.max(segmentStart + minSegmentDuration, windowEnd + edgePadding),
+                                });
+                                segmentStart = null;
+                            }
+                        });
+
+                        if (segmentStart !== null) {
+                            rawSegments.push({
+                                start: Math.max(0, segmentStart - edgePadding),
+                                end: monoSamples.length / sourceSampleRate,
+                            });
+                        }
+
+                        const mergedSegments = [];
+                        rawSegments.forEach((segment) => {
+                            const safeSegment = {
+                                start: Math.max(0, segment.start),
+                                end: Math.max(segment.start + minSegmentDuration, segment.end),
+                            };
+                            const previous = mergedSegments[mergedSegments.length - 1];
+                            if (previous && safeSegment.start - previous.end <= minGapDuration) {
+                                previous.end = Math.max(previous.end, safeSegment.end);
+                                return;
+                            }
+                            mergedSegments.push(safeSegment);
+                        });
+
+                        return mergedSegments
+                            .map((segment) => ({
+                                start: baseOffset + segment.start,
+                                end: baseOffset + segment.end,
+                                dur: Math.max(0.28, segment.end - segment.start),
+                            }))
+                            .filter((segment) => segment.dur >= minSegmentDuration)
+                            .slice(0, 72);
+                    }
+
+                    function buildFallbackLocalSegments(rangeStart, rangeEnd) {
+                        const safeStart = Math.max(0, rangeStart || 0);
+                        const safeEnd = Math.max(safeStart + 0.5, rangeEnd || safeStart + 3);
+                        const totalDuration = safeEnd - safeStart;
+                        const segmentCount = Math.max(2, Math.min(12, Math.round(totalDuration / 3.6)));
+                        const segmentDuration = totalDuration / segmentCount;
+                        const segments = [];
+
+                        for (let index = 0; index < segmentCount; index++) {
+                            const start = safeStart + index * segmentDuration;
+                            const end = Math.min(safeEnd, start + segmentDuration * 0.92);
+                            segments.push({
+                                start,
+                                end,
+                                dur: Math.max(0.5, end - start),
+                            });
+                        }
+
+                        return segments;
+                    }
+
+                    function buildTimedWordsFromPhraseWords(words, start, end) {
+                        const safeWords = (words || []).filter(Boolean);
+                        if (!safeWords.length) return [];
+                        const totalDuration = Math.max(0.32, end - start);
+                        const slot = totalDuration / safeWords.length;
+                        return safeWords.map((word, index) => ({
+                            word,
+                            start: start + slot * index,
+                            end: Math.min(end, start + slot * (index + 1) - Math.min(0.05, slot * 0.16)),
+                        }));
+                    }
+
+                    function buildLocalCuesFromSegments(segments) {
+                        const localPhraseBank = [
+                            ["Mira", "esto"],
+                            ["Ojo", "aquí"],
+                            ["Esto", "pega"],
+                            ["Sigue", "mirando"],
+                            ["Aquí", "arranca"],
+                            ["No", "te", "lo", "pierdas"],
+                            ["Ahora", "viene", "lo", "bueno"],
+                            ["Atento", "a", "esto"],
+                            ["Esto", "se", "pone", "serio"],
+                            ["Mira", "bien", "esto"],
+                        ];
+
+                        return segments.map((segment, index) => {
+                            const phrase = localPhraseBank[index % localPhraseBank.length];
+                            const maxWords = Math.max(1, Math.min(phrase.length, Math.round(segment.dur / 0.58)));
+                            const phraseWords = phrase.slice(0, maxWords);
+                            const words = buildTimedWordsFromPhraseWords(phraseWords, segment.start, segment.end);
+                            return {
+                                start: segment.start,
+                                end: segment.end,
+                                text: phraseWords.join(" "),
+                                words,
+                            };
+                        });
+                    }
+
+                    async function createLocalSubtitleResult(file, options = {}) {
+                        const {
+                            clipRange = null,
+                            subtitleLanguage,
+                            progressBarEl,
+                            progressTextEl,
+                        } = options;
+
+                        updateStatus(
+                            clipRange
+                                ? "Analizando el audio del clip localmente..."
+                                : "Analizando el audio localmente para generar subtítulos...",
+                            true,
+                        );
+                        setProgress(progressBarEl, progressTextEl, 8);
+
+                        const decodedBuffer = await getDecodedAudioBuffer(file);
+                        setProgress(progressBarEl, progressTextEl, 34);
+
+                        const rangeStart = Math.max(0, clipRange?.start || 0);
+                        const rangeEnd = Math.max(rangeStart + 0.5, clipRange?.end || decodedBuffer.duration || rangeStart + 3);
+                        const detectedSegments = detectSpeechSegmentsFromAudio(decodedBuffer, clipRange);
+                        const localSegments = detectedSegments.length
+                            ? detectedSegments
+                            : buildFallbackLocalSegments(rangeStart, rangeEnd);
+
+                        setProgress(progressBarEl, progressTextEl, 58);
+                        let generatedCues = buildLocalCuesFromSegments(localSegments);
+
+                        if (subtitleLanguage?.code && subtitleLanguage.code !== "es") {
+                            updateStatus("Traduciendo subtítulos locales...", true);
+                            generatedCues = await translateCues(generatedCues, subtitleLanguage.code);
+                        }
+
+                        setProgress(progressBarEl, progressTextEl, 92);
+                        return {
+                            cues: normalizeCueTimeline(generatedCues, Math.max(0.5, rangeEnd - rangeStart)),
+                            words: false,
+                        };
+                    }
+
                     async function createWavFallbackFromDecodedAudio(file, clipRange, progressBarEl, progressTextEl) {
                         const targetSampleRate = 16000;
 
@@ -2138,10 +2342,27 @@ window.AppModule1 = (() => {
                     populateSubtitleLanguageOptions();
         
                     function updateStatus(msg, active) {
-                        statusEl.innerHTML =
-                            '<span class="status-dot"></span> ' + (msg || "");
-                        if (typeof active === "boolean")
+                        const safeMessage = String(msg || "");
+                        const tone = /error|fallo|no se pudo|invalido|rechaz|cuota excedida|demasiado inestable/i.test(safeMessage)
+                            ? "error"
+                            : /reintent|pausada|preparando|corrigiendo|procesando|subiendo/i.test(safeMessage)
+                            ? "warning"
+                            : /listo|complet|sincronizacion precisa|video listo|archivo cargado/i.test(safeMessage)
+                            ? "success"
+                            : "default";
+
+                        statusEl.textContent = "";
+                        const dot = document.createElement("span");
+                        dot.className = "status-dot";
+                        statusEl.appendChild(dot);
+                        statusEl.appendChild(document.createTextNode(" " + safeMessage));
+                        statusEl.classList.remove("status-error", "status-warning", "status-success");
+                        if (tone === "error") statusEl.classList.add("status-error");
+                        else if (tone === "warning") statusEl.classList.add("status-warning");
+                        else if (tone === "success") statusEl.classList.add("status-success");
+                        if (typeof active === "boolean") {
                             statusEl.classList.toggle("active", active);
+                        }
                     }
         
                     const fileInfoCard = document.getElementById("fileInfoCard");
@@ -2187,7 +2408,7 @@ window.AppModule1 = (() => {
                             const bgY = (CANVAS_H - bgH) / 2;
         
                             ctx.save();
-                            ctx.filter = `blur(${BLUR_PX}px) brightness(0.65)`;
+                            ctx.filter = `blur(${BLUR_PX}px) brightness(${BLUR_BRIGHTNESS})`;
                             ctx.drawImage(videoEl, 0, 0, vw, vh, bgX, bgY, bgW, bgH);
                             ctx.restore();
         
@@ -2291,11 +2512,20 @@ window.AppModule1 = (() => {
                       const py = CANVAS_H - (parseInt(vPos.value) * (CANVAS_H / 520) || 100);
         
                       // 2. Procesar palabras y agrupar en líneas para evitar desbordamiento (Ajuste para 9:16)
-                      const wordsData = s.words && s.words.length > 0 ? s.words : s.text.split(' ').map((w, i, arr) => ({
+                      let wordsData = s.words && s.words.length > 0 ? s.words : s.text.split(' ').map((w, i, arr) => ({
                           word: w,
                           start: s.start + (i / arr.length) * (s.end - s.start),
                           end: s.end
                       }));
+
+                      if (currentAnim === 'one-word' && wordsData.length > 0) {
+                          const activeWord = wordsData.find((wordData) => t >= wordData.start && t <= wordData.end);
+                          if (!activeWord) {
+                              ctx.restore();
+                              return;
+                          }
+                          wordsData = [activeWord];
+                      }
         
                       const maxW = CANVAS_W * 0.88; // Margen de seguridad para que no toque los bordes
                       const lines = [];
@@ -2389,6 +2619,7 @@ window.AppModule1 = (() => {
                                   const p = Math.min(1, wordElapsed / animDur);
         
                                   if (currentAnim === 'typewriter') { opacity = p; yOff = (1-p)*6; }
+                                  else if (currentAnim === 'one-word') { opacity = p; scale = p < 0.45 ? 0.72 + (p/0.45)*0.5 : 1.22 - ((p-0.45)/0.55)*0.22; blur = p < 0.3 ? (1-p/0.3)*10 : 0; yOff = p < 0.4 ? (1-p/0.4)*8 : 0; }
                                   else if (currentAnim === 'float') { opacity = p; yOff = p < 0.6 ? (1-p/0.6)*10 : (p-0.6)/0.4*-3; if(p>0.6) yOff = -3 + (p-0.6)/0.4*3; }
                                   else if (currentAnim === 'bounce') {
                                       opacity = p;
@@ -2412,6 +2643,12 @@ window.AppModule1 = (() => {
                                   else if (currentAnim === 'slide-up') { opacity = p; yOff = (1-p)*20; }
                                   else if (currentAnim === 'slide-left') { opacity = p; xOff = (1-p)*30; }
                                   else if (currentAnim === 'zoom-blur') { scale = 1.6 - (p*0.6); blur = (1-p)*8; opacity = p; }
+                                  else if (currentAnim === 'stomp') { opacity = p; scale = p < 0.55 ? (p/0.55)*1.28 : 1.28 - ((p-0.55)/0.45)*0.28; yOff = p < 0.55 ? (1-p/0.55)*18 : -2 + ((p-0.55)/0.45)*2; }
+                                  else if (currentAnim === 'drift') { opacity = p; xOff = (1-p)*22; yOff = Math.sin(p * Math.PI) * -6; rotate = (1-p) * -8; }
+                                  else if (currentAnim === 'flash-pop') { opacity = p; scale = p < 0.4 ? 0.7 + (p/0.4)*0.6 : 1.3 - ((p-0.4)/0.6)*0.3; blur = p < 0.35 ? (1-p/0.35)*12 : 0; }
+                                  else if (currentAnim === 'elastic') { opacity = p; scale = p < 0.5 ? (p/0.5)*1.18 : 1.18 - ((p-0.5)/0.5)*0.18; xOff = Math.sin(p * Math.PI * 2) * 4 * (1-p); }
+                                  else if (currentAnim === 'spin-in') { opacity = p; rotate = (1-p)*-180; scale = 0.65 + (p*0.35); blur = (1-p)*5; }
+                                  else if (currentAnim === 'signal') { opacity = p; xOff = p < 0.2 ? -6 : p < 0.4 ? 6 : p < 0.6 ? -3 : 0; yOff = p < 0.5 ? (1-p/0.5)*4 : 0; }
         
                                   ctx.globalAlpha = opacity;
                                   if (blur > 0) ctx.filter = `blur(${blur}px)`;
@@ -2577,27 +2814,75 @@ window.AppModule1 = (() => {
                     const specialTemplates = [
                         {
                             id: "style-1-red",
-                            label: "1 - Rojo",
+                            label: "Impacto Rojo",
+                            baseStyle: "style-1",
                             emphColor: "#ff4d4d",
                             glow: "rgba(255,77,77,0.6)",
+                            previewText: "Ataque total",
+                            previewBg: "linear-gradient(180deg, rgba(43,8,8,0.2), rgba(0,0,0,0.62))",
                         },
                         {
                             id: "style-1-green",
-                            label: "1.1 - Verde",
+                            label: "Veneno Verde",
+                            baseStyle: "style-1",
                             emphColor: "#4dff91",
                             glow: "rgba(77,255,145,0.6)",
+                            previewText: "Modo viral",
+                            previewBg: "linear-gradient(180deg, rgba(3,38,22,0.18), rgba(0,0,0,0.62))",
                         },
                         {
                             id: "style-1-yellow",
-                            label: "1.2 - Amarillo",
-                            emphColor: "#ffe94d",
-                            glow: "rgba(255,233,77,0.6)",
+                            label: "Azul Claro",
+                            baseStyle: "style-1",
+                            emphColor: "#7dd3fc",
+                            glow: "rgba(125,211,252,0.62)",
+                            previewText: "Rompe ahora",
+                            previewBg: "linear-gradient(180deg, rgba(8,32,57,0.18), rgba(0,0,0,0.62))",
                         },
                         {
                             id: "style-1-blue",
-                            label: "1.3 - Azul",
+                            label: "Voltaje Azul",
+                            baseStyle: "style-1",
                             emphColor: "#4daeff",
                             glow: "rgba(77,174,255,0.6)",
+                            previewText: "Carga épica",
+                            previewBg: "linear-gradient(180deg, rgba(5,26,58,0.18), rgba(0,0,0,0.62))",
+                        },
+                        {
+                            id: "style-23-emerald",
+                            label: "Emerald Banner",
+                            baseStyle: "style-23",
+                            emphColor: "#d7ffe9",
+                            glow: "rgba(16,185,129,0.55)",
+                            previewText: "Sube el nivel",
+                            previewBg: "linear-gradient(180deg, rgba(3,28,18,0.22), rgba(0,0,0,0.58))",
+                        },
+                        {
+                            id: "style-47-gold",
+                            label: "Gold Punch",
+                            baseStyle: "style-47",
+                            emphColor: "#ffe39a",
+                            glow: "rgba(245,158,11,0.55)",
+                            previewText: "Golpe maestro",
+                            previewBg: "linear-gradient(180deg, rgba(49,25,4,0.22), rgba(0,0,0,0.58))",
+                        },
+                        {
+                            id: "style-63-signal",
+                            label: "Signal Prime",
+                            baseStyle: "style-63",
+                            emphColor: "#fff4a6",
+                            glow: "rgba(234,179,8,0.5)",
+                            previewText: "Míralo bien",
+                            previewBg: "linear-gradient(180deg, rgba(38,34,6,0.22), rgba(0,0,0,0.58))",
+                        },
+                        {
+                            id: "style-86-fever",
+                            label: "Fever Pink",
+                            baseStyle: "style-86",
+                            emphColor: "#ffd6e6",
+                            glow: "rgba(251,113,133,0.5)",
+                            previewText: "Esto explota",
+                            previewBg: "linear-gradient(180deg, rgba(59,10,23,0.22), rgba(0,0,0,0.58))",
                         },
                     ];
                     specialTemplates.forEach((tpl) => {
@@ -2606,21 +2891,21 @@ window.AppModule1 = (() => {
                         btn.dataset.style = tpl.id;
                         const label = document.createElement("div");
                         label.className = "style-btn-label";
-                        label.textContent = "Plantilla " + tpl.label;
+                        label.textContent = tpl.label;
                         const preview = document.createElement("div");
                         preview.className = "style-btn-preview";
-                        preview.style.background = "rgba(0,0,0,0.55)";
+                        preview.style.background = tpl.previewBg || "rgba(0,0,0,0.55)";
                         preview.style.borderRadius = "0 0 10px 10px";
                         const sampleSpan = document.createElement("span");
-                        sampleSpan.className = "style-1";
+                        sampleSpan.className = tpl.baseStyle || "style-1";
                         sampleSpan.style.fontFamily = "Oswald, Inter";
                         sampleSpan.style.textTransform = "uppercase";
                         sampleSpan.innerHTML =
-                            'Hola <span style="color:' +
+                            (tpl.previewText || "Hola") + ' <span style="color:' +
                             tpl.emphColor +
                             ";text-shadow:0 0 8px " +
                             tpl.glow +
-                            ';font-weight:900">mundo</span>';
+                            ';font-weight:900">épico</span>';
                         preview.appendChild(sampleSpan);
                         btn.appendChild(label);
                         btn.appendChild(preview);
@@ -2631,10 +2916,13 @@ window.AppModule1 = (() => {
                                     b.classList.remove("active", "active-check"),
                                 );
                             btn.classList.add("active", "active-check");
-                            currentStyle = "style-1";
+                            currentStyle = tpl.baseStyle || "style-1";
                             currentEmphColor = tpl.emphColor;
                             currentEmphGlow = tpl.glow;
-                            subtitleEl.className = "subtitle style-1 no-bg";
+                            const baseStyleNumber = parseInt(currentStyle.replace("style-", "")) || 1;
+                            subtitleEl.className = "subtitle " + currentStyle;
+                            if (noBgStyles.has(baseStyleNumber)) subtitleEl.classList.add("no-bg");
+                            else subtitleEl.classList.remove("no-bg");
                         });
                         stylesGrid.appendChild(btn);
                     });
@@ -2736,6 +3024,189 @@ window.AppModule1 = (() => {
                         const f = e.target.files[0];
                         if (!f) return;
                         triggerFileLoad(f);
+                    });
+
+                    function parseSubtitleTimestamp(rawValue) {
+                        const value = String(rawValue || "").trim().replace(",", ".");
+                        const parts = value.split(":").map((part) => part.trim());
+                        if (parts.length < 2) return NaN;
+
+                        let hours = 0;
+                        let minutes = 0;
+                        let seconds = 0;
+
+                        if (parts.length === 3) {
+                            hours = Number(parts[0]) || 0;
+                            minutes = Number(parts[1]) || 0;
+                            seconds = Number(parts[2]) || 0;
+                        } else {
+                            minutes = Number(parts[0]) || 0;
+                            seconds = Number(parts[1]) || 0;
+                        }
+
+                        return hours * 3600 + minutes * 60 + seconds;
+                    }
+
+                    function parseSubtitleFileContent(content, fileName, defaultDuration) {
+                        const rawText = String(content || "").replace(/^\uFEFF/, "");
+                        const extension = getFileExtension(fileName);
+                        const isVtt = extension === ".vtt" || rawText.trimStart().toUpperCase().startsWith("WEBVTT");
+                        const normalizedText = isVtt
+                            ? rawText.replace(/^WEBVTT[^\n]*\n+/i, "")
+                            : rawText;
+                        const blocks = normalizedText
+                            .split(/\r?\n\r?\n+/)
+                            .map((block) => block.trim())
+                            .filter(Boolean);
+                        const cuesFromFile = [];
+
+                        blocks.forEach((block) => {
+                            const lines = block.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+                            if (!lines.length) return;
+
+                            const timingIndex = lines.findIndex((line) => line.includes("-->"));
+                            if (timingIndex === -1) return;
+
+                            const timingLine = lines[timingIndex];
+                            const [rawStart, rawEnd] = timingLine.split("-->").map((part) => part.trim().split(/\s+/)[0]);
+                            const start = parseSubtitleTimestamp(rawStart);
+                            const end = parseSubtitleTimestamp(rawEnd);
+                            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+
+                            const text = lines
+                                .slice(timingIndex + 1)
+                                .join(" ")
+                                .replace(/<[^>]+>/g, " ")
+                                .replace(/\s+/g, " ")
+                                .trim();
+                            if (!text) return;
+
+                            cuesFromFile.push({
+                                start,
+                                end,
+                                text,
+                                words: buildTimedWordsFromText(text, start, end),
+                            });
+                        });
+
+                        if (cuesFromFile.length > 0) {
+                            const maxEnd = cuesFromFile[cuesFromFile.length - 1]?.end || defaultDuration || undefined;
+                            return {
+                                cues: normalizeCueTimeline(cuesFromFile, maxEnd),
+                                words: true,
+                            };
+                        }
+
+                        const generatedCues = generateCuesFromTranscript(rawText.trim(), defaultDuration || 8);
+                        return {
+                            cues: normalizeCueTimeline(generatedCues, defaultDuration || undefined),
+                            words: false,
+                        };
+                    }
+
+                    async function applyTranscriptionResultToEditor(transcriptionResult, activeClip, subtitleLanguage) {
+                        let activeCues = transcriptionResult.cues;
+
+                        if (activeClip) {
+                            const looksRelativeToClip =
+                                activeCues.length > 0 &&
+                                activeCues[0].start < Math.max(0.25, activeClip.start - 0.1) &&
+                                activeCues[activeCues.length - 1].end <= activeClip.dur + 0.5;
+                            activeCues = normalizeCueTimeline(
+                                looksRelativeToClip
+                                    ? shiftCuesToTimeline(activeCues, activeClip.start)
+                                    : activeCues,
+                                activeClip.end,
+                            );
+                        }
+
+                        const previewText = createPreviewTextFromCues(activeCues);
+
+                        if (activeClip) {
+                            activeClip.subtitleData = {
+                                cues: activeCues,
+                                previewText,
+                                languageCode: subtitleLanguage.code,
+                                languageLabel: subtitleLanguage.label,
+                            };
+                        } else {
+                            fullVideoSubtitleData = {
+                                cues: activeCues,
+                                previewText,
+                                languageCode: subtitleLanguage.code,
+                                languageLabel: subtitleLanguage.label,
+                            };
+                        }
+
+                        cues = activeCues;
+                        setTranscriptPreviewText(previewText);
+
+                        updateStatus(
+                            (activeClip
+                                ? "Subtitulos del clip " + getClipDisplayLabel(activeClip) + " listos"
+                                : "Subtitulos en " + subtitleLanguage.label + " listos") +
+                                " - sincronizacion " + (transcriptionResult.words ? "precisa" : "aproximada"),
+                            true,
+                        );
+
+                        setTimeout(() => {
+                            loaderWrap.style.display = "none";
+                        }, 600);
+
+                        videoEl.currentTime = activeClip ? activeClip.start : 0;
+                        await safePlayVideo("No se pudo reanudar el video después de generar los subtítulos.");
+                    }
+
+                    localBtn.addEventListener("click", () => {
+                        const file = fileInput.files[0] || lastLoadedFile;
+                        if (!file) {
+                            updateStatus("Carga un video primero para poder insertar subtítulos.");
+                            return;
+                        }
+                        localSubtitleInput.value = "";
+                        localSubtitleInput.click();
+                    });
+
+                    localSubtitleInput.addEventListener("change", async (event) => {
+                        const subtitleFile = event.target.files?.[0];
+                        if (!subtitleFile) return;
+
+                        const videoFile = fileInput.files[0] || lastLoadedFile;
+                        if (!videoFile) {
+                            updateStatus("Carga un video primero para poder insertar subtítulos.", false);
+                            return;
+                        }
+
+                        const pBar = document.getElementById("transcribeProgressBar");
+                        const pText = document.getElementById("transcribePercent");
+                        const subtitleLanguage = getSelectedSubtitleLanguage();
+                        const activeClip = isViewingClip && selectedClip ? selectedClip : null;
+                        const fallbackDuration = activeClip ? activeClip.dur : videoDuration || 8;
+
+                        loaderWrap.style.display = "block";
+                        setProgress(pBar, pText, 6, { force: true });
+                        updateStatus("Leyendo archivo de subtítulos local...", true);
+
+                        try {
+                            const subtitleText = await subtitleFile.text();
+                            setProgress(pBar, pText, 42);
+                            const parsedResult = parseSubtitleFileContent(
+                                subtitleText,
+                                subtitleFile.name,
+                                fallbackDuration,
+                            );
+                            setProgress(pBar, pText, 100);
+                            await applyTranscriptionResultToEditor(
+                                parsedResult,
+                                activeClip,
+                                subtitleLanguage,
+                            );
+                            updateStatus("Subtítulos cargados desde archivo local.", true);
+                        } catch (error) {
+                            loaderWrap.style.display = "none";
+                            updateStatus("No se pudo leer el archivo de subtítulos. Usa SRT, VTT o TXT válido.", false);
+                            console.error("Error cargando subtítulos locales:", error);
+                        }
                     });
         
                     transcribeBtn.addEventListener("click", async () => {
@@ -2944,55 +3415,12 @@ window.AppModule1 = (() => {
                                 }
                             }
         
-                            // Al recibir respuesta, completamos al 100%
                             setProgress(pBar, pText, 100);
-
-                            let activeCues = transcriptionResult.cues;
-
-                            if (activeClip) {
-                                activeCues = normalizeCueTimeline(
-                                    shiftCuesToTimeline(activeCues, activeClip.start),
-                                    activeClip.end,
-                                );
-                            }
-
-                            const previewText = createPreviewTextFromCues(activeCues);
-
-                            if (activeClip) {
-                                activeClip.subtitleData = {
-                                    cues: activeCues,
-                                    previewText,
-                                    languageCode: subtitleLanguage.code,
-                                    languageLabel: subtitleLanguage.label,
-                                };
-                            } else {
-                                fullVideoSubtitleData = {
-                                    cues: activeCues,
-                                    previewText,
-                                    languageCode: subtitleLanguage.code,
-                                    languageLabel: subtitleLanguage.label,
-                                };
-                            }
-
-                            cues = activeCues;
-
-                            setTranscriptPreviewText(previewText);
-
-                            updateStatus(
-                                (activeClip
-                                    ? "Subtitulos del clip " + getClipDisplayLabel(activeClip) + " listos"
-                                    : "Subtitulos en " + subtitleLanguage.label + " listos") +
-                                    " - sincronizacion " + (transcriptionResult.words ? "precisa" : "aproximada"),
-                                true,
+                            await applyTranscriptionResultToEditor(
+                                transcriptionResult,
+                                activeClip,
+                                subtitleLanguage,
                             );
-                            
-                            // Pequeño retardo para que el usuario vea el 100% antes de cerrar
-                            setTimeout(() => {
-                                loaderWrap.style.display = "none";
-                            }, 600);
-        
-                            videoEl.currentTime = activeClip ? activeClip.start : 0;
-                            await safePlayVideo("No se pudo reanudar el video después de generar los subtítulos.");
                         } catch (err) {
                             loaderWrap.style.display = "none";
                             const status = err.status || 0;
@@ -3134,6 +3562,12 @@ window.AppModule1 = (() => {
                             cueMatchesActiveTypewriter(cues[idx])
                         ) {
                             syncTypewriterWords(videoEl.currentTime);
+                        } else if (
+                            currentAnim === "one-word" &&
+                            activeSingleWordCue &&
+                            cueMatchesActiveSingleWord(cues[idx])
+                        ) {
+                            syncSingleWordWords(videoEl.currentTime);
                         }
                     });
                     videoEl.addEventListener("pause", () => {
@@ -3161,6 +3595,8 @@ window.AppModule1 = (() => {
                         }
                         activeTypewriterCue = null;
                         activeTypewriterContainer = null;
+                        activeSingleWordCue = null;
+                        activeSingleWordContainer = null;
                         subtitleEl.innerHTML = "";
                     }
 
@@ -3171,6 +3607,16 @@ window.AppModule1 = (() => {
                             activeTypewriterCue.start === cue.start &&
                             activeTypewriterCue.end === cue.end &&
                             activeTypewriterCue.text === cue.text
+                        );
+                    }
+
+                    function cueMatchesActiveSingleWord(cue) {
+                        return (
+                            activeSingleWordCue &&
+                            cue &&
+                            activeSingleWordCue.start === cue.start &&
+                            activeSingleWordCue.end === cue.end &&
+                            activeSingleWordCue.text === cue.text
                         );
                     }
 
@@ -3210,6 +3656,43 @@ window.AppModule1 = (() => {
                             );
                         }
                     }
+
+                    function syncSingleWordWords(currentTime) {
+                        if (!activeSingleWordCue || !activeSingleWordContainer) return;
+                        const wordSlot = activeSingleWordContainer.querySelector(".word");
+                        if (!wordSlot) return;
+
+                        const activeIndex = activeSingleWordCue.words.findIndex((wordData) => (
+                            currentTime >= (wordData?.start ?? activeSingleWordCue.start) &&
+                            currentTime <= (wordData?.end ?? activeSingleWordCue.end)
+                        ));
+
+                        if (activeIndex === -1) {
+                            wordSlot.style.opacity = "0";
+                            wordSlot.textContent = "";
+                            wordSlot.dataset.wordIndex = "-1";
+                            return;
+                        }
+
+                        const wordData = activeSingleWordCue.words[activeIndex];
+                        if (wordSlot.dataset.wordIndex !== String(activeIndex)) {
+                            wordSlot.textContent = wordData.word;
+                            if (currentEmphColor) {
+                                applyWordEmphasisColored(
+                                    wordSlot,
+                                    wordData.word,
+                                    activeIndex,
+                                    currentEmphColor,
+                                    currentEmphGlow,
+                                );
+                            } else {
+                                applyWordEmphasis(wordSlot, wordData.word, activeIndex);
+                            }
+                            applyAnimToWord(wordSlot, 0, "one-word");
+                            wordSlot.dataset.wordIndex = String(activeIndex);
+                        }
+                        wordSlot.style.opacity = "1";
+                    }
         
                     function applyAnimToWord(span, delay, anim) {
                         const dur = 320;
@@ -3223,6 +3706,11 @@ window.AppModule1 = (() => {
                             typewriter: [
                                 { transform: "translateY(6px)", opacity: 0 },
                                 { transform: "translateY(0)", opacity: 1 },
+                            ],
+                            "one-word": [
+                                { transform: "translateY(8px) scale(0.72)", filter: "blur(10px)", opacity: 0 },
+                                { transform: "translateY(-2px) scale(1.22)", filter: "blur(0)", opacity: 1, offset: 0.45 },
+                                { transform: "translateY(0) scale(1)", opacity: 1 },
                             ],
                             float: [
                                 { transform: "translateY(10px)", opacity: 0 },
@@ -3361,6 +3849,39 @@ window.AppModule1 = (() => {
                                     opacity: 1,
                                 },
                             ],
+                            stomp: [
+                                { transform: "translateY(18px) scale(0.3)", opacity: 0 },
+                                { transform: "translateY(-2px) scale(1.28)", opacity: 1, offset: 0.55 },
+                                { transform: "translateY(0) scale(1)", opacity: 1 },
+                            ],
+                            drift: [
+                                { transform: "translateX(22px) translateY(6px) rotate(-8deg)", opacity: 0 },
+                                { transform: "translateX(-4px) translateY(-4px) rotate(2deg)", opacity: 1, offset: 0.7 },
+                                { transform: "translateX(0) translateY(0) rotate(0)", opacity: 1 },
+                            ],
+                            "flash-pop": [
+                                { transform: "scale(0.7)", filter: "blur(12px)", opacity: 0 },
+                                { transform: "scale(1.3)", filter: "blur(0)", opacity: 1, offset: 0.4 },
+                                { transform: "scale(1)", opacity: 1 },
+                            ],
+                            elastic: [
+                                { transform: "scaleX(0.4) scaleY(1.5)", opacity: 0 },
+                                { transform: "scaleX(1.16) scaleY(0.88)", opacity: 1, offset: 0.55 },
+                                { transform: "scaleX(0.96) scaleY(1.04)", offset: 0.8 },
+                                { transform: "scale(1)", opacity: 1 },
+                            ],
+                            "spin-in": [
+                                { transform: "rotate(-180deg) scale(0.65)", filter: "blur(5px)", opacity: 0 },
+                                { transform: "rotate(10deg) scale(1.05)", filter: "blur(0)", opacity: 1, offset: 0.7 },
+                                { transform: "rotate(0) scale(1)", opacity: 1 },
+                            ],
+                            signal: [
+                                { transform: "translateX(-6px) translateY(4px)", opacity: 0 },
+                                { transform: "translateX(6px) translateY(-1px)", opacity: 1, offset: 0.25 },
+                                { transform: "translateX(-3px)", offset: 0.5 },
+                                { transform: "translateX(2px)", offset: 0.75 },
+                                { transform: "translateX(0) translateY(0)", opacity: 1 },
+                            ],
                         };
                         const kf = anims[anim] || anims["typewriter"];
                         span.animate(kf, opts);
@@ -3398,6 +3919,19 @@ window.AppModule1 = (() => {
                         subtitleEl.innerHTML = "";
                         const container = document.createElement("div");
                         container.style.display = "inline-block";
+                        if (currentAnim === "one-word") {
+                            const span = document.createElement("span");
+                            span.className = "word single-word-slot";
+                            span.style.opacity = "0";
+                            span.dataset.wordIndex = "-1";
+                            container.appendChild(span);
+                            subtitleEl.appendChild(container);
+                            subtitleEl.classList.add("show");
+                            activeSingleWordCue = cue;
+                            activeSingleWordContainer = container;
+                            syncSingleWordWords(videoEl.currentTime);
+                            return;
+                        }
                         cue.words.forEach((w, i) => {
                             const span = document.createElement("span");
                             span.className = "word";
